@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 8x8 pixel crate on a 108dp adaptive canvas (safe zone 66dp centred). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:translateX="30" android:translateY="30">
+        <path android:fillColor="@color/lcd_ink"
+            android:pathData="M0,0h48v6h-48z M0,42h48v6h-48z M0,6h6v36h-6z M42,6h6v36h-6z
+                M6,6h6v6h-6z M36,6h6v6h-6z M6,36h6v6h-6z M36,36h6v6h-6z
+                M12,12h6v6h-6z M30,12h6v6h-6z M12,30h6v6h-6z M30,30h6v6h-6z
+                M18,18h12v12h-12z" />
+    </group>
+</vector>

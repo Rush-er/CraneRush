@@ -1,0 +1,5 @@
+<resources>
+    <color name="bezel">#FF26292E</color>
+    <color name="lcd_bg">#FF9DB27E</color>
+    <color name="lcd_ink">#FF1C2614</color>
+</resources>
