@@ -32,17 +32,31 @@ class FrameBuffer(val w: Int, val h: Int) {
         }
     }
 
-    fun text(str: String, x: Int, y: Int) {
+    fun text(str: String, x: Int, y: Int, on: Boolean = true) {
         var cx = x
         for (c in str.uppercase()) {
             Font.glyph(c)?.let { g ->
-                for (i in 0 until 15) if (g[i]) set(cx + i % 3, y + i / 3)
+                for (i in 0 until 15) if (g[i]) set(cx + i % 3, y + i / 3, on)
             }
             cx += 4
         }
     }
 
     fun textCentered(str: String, y: Int) = text(str, (w - textWidth(str)) / 2, y)
+
+    /**
+     * A pressable LCD button whose text baseline row is [ty]: framed box with a drop shadow,
+     * inverted (filled, light text) when [selected].
+     */
+    fun button(x: Int, ty: Int, bw: Int, label: String, selected: Boolean) {
+        val y = ty - 2
+        val bh = 9
+        if (selected) fill(x, y, bw, bh, true)
+        else panel(x, y, bw, bh)
+        hline(x + 1, x + bw, y + bh)          // shadow
+        vline(x + bw, y + 1, y + bh)
+        text(label, x + (bw - textWidth(label)) / 2, ty, !selected)
+    }
 
     companion object {
         fun textWidth(str: String) = if (str.isEmpty()) 0 else str.length * 4 - 1

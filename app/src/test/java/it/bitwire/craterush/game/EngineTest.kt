@@ -50,6 +50,10 @@ class EngineTest {
         val e = Engine(Random(1))
         val fb = FrameBuffer(e.w, e.h)
         assertEquals(Engine.State.TITLE, e.state)
+        e.menuMove(1); e.menuSelect()                     // MODE item cycles the mode
+        assertEquals(Mode.BOMB_RUSH, e.settings.mode)
+        e.menuAdjust(-1)
+        assertEquals(Mode.CAMPAIGN, e.settings.mode)
         e.menuMove(1); e.menuSelect()
         assertEquals(Engine.State.SETTINGS, e.state)
         e.menuAdjust(1)                       // difficulty -> HARD
@@ -210,5 +214,71 @@ class EngineTest {
         e.pressJump()
         repeat(40) { e.update(1f / 60f) }
         assertEquals(Engine.State.DYING, e.state)
+    }
+
+    @Test fun bombRushAndVersusRandomPlay() {
+        for (m in listOf(Mode.BOMB_RUSH, Mode.VERSUS)) for (wh in Warehouse.entries) for (d in Difficulty.entries) {
+            repeat(3) { seed ->
+                val e = Engine(Random(seed + 100))
+                e.settings.mode = m; e.settings.warehouse = wh; e.settings.difficulty = d
+                e.newGame()
+                val seen = play(e, Random(seed), 300f)
+                assertTrue(Engine.State.PLAYING in seen)
+            }
+        }
+    }
+
+    @Test fun bombRushIsMostlyBombsAndSpeedsUp() {
+        val e = Engine(Random(20))
+        e.settings.mode = Mode.BOMB_RUSH
+        e.newGame(); e.testSkipBanner()
+        assertEquals(1, e.level)
+        var t = 0f
+        while (t < Engine.RUSH_LEVEL_TIME + 1f && e.state != Engine.State.DYING) {
+            e.update(1f / 60f); e.events.clear(); t += 1f / 60f
+            if (e.state == Engine.State.CLEARING || e.state == Engine.State.BANNER) continue
+        }
+        if (e.state != Engine.State.DYING) assertEquals(2, e.level)
+    }
+
+    @Test fun versusCraneDropsAndCanCrushWorker() {
+        // Crane always over the worker and dropping: on EASY it should get him at least sometimes.
+        var craneWins = 0
+        repeat(10) { seed ->
+            val e = Engine(Random(seed))
+            e.settings.mode = Mode.VERSUS; e.settings.difficulty = Difficulty.EASY
+            e.newGame(); e.testSkipBanner()
+            var t = 0f
+            while (t < 130f && (e.state == Engine.State.PLAYING || e.state == Engine.State.CLEARING)) {
+                val target = e.testPlayerCol()
+                val craneCol = e.testVsCol()
+                e.leftHeld = craneCol > target; e.rightHeld = craneCol < target
+                if (craneCol == target) e.pressJump()
+                e.update(1f / 60f); e.events.clear(); t += 1f / 60f
+            }
+            if (e.state == Engine.State.DYING || (e.state == Engine.State.GAME_OVER && e.score > 0)) craneWins++
+        }
+        assertTrue("crane never won", craneWins > 0)
+    }
+
+    @Test fun versusWorkerWinsByRows() {
+        val e = Engine(Random(21))
+        e.settings.mode = Mode.VERSUS
+        e.newGame(); e.testSkipBanner()
+        repeat(5) {
+            for (c in 0 until e.cols) e.testPlace(c, Engine.WOOD)
+            e.update(0.001f)
+            repeat(40) { e.update(1f / 60f) }
+        }
+        assertEquals(Engine.State.GAME_OVER, e.state)
+        assertEquals(0, e.score)
+    }
+
+    @Test fun versusIdleCraneWorkerSurvivesTimer() {
+        val e = Engine(Random(22))
+        e.settings.mode = Mode.VERSUS
+        e.newGame(); e.testSkipBanner()
+        repeat(((Engine.VS_TIME + 2f) * 60).toInt()) { e.update(1f / 60f) }
+        assertEquals(Engine.State.GAME_OVER, e.state)
     }
 }

@@ -10,6 +10,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import it.bitwire.craterush.game.Difficulty
 import it.bitwire.craterush.game.Engine
+import it.bitwire.craterush.game.Mode
 import it.bitwire.craterush.game.Warehouse
 
 class MainActivity : ComponentActivity() {
@@ -69,11 +70,15 @@ class MainActivity : ComponentActivity() {
         e.bestLevel = prefs.getInt("best_level", 1).coerceIn(1, Engine.MAX_LEVEL)
         s.startLevel = prefs.getInt("start_level", 1).coerceIn(1, e.bestLevel)
         val legacyHi = prefs.getInt("hi_score", 0) // single hi score from version 1.0
-        for (d in Difficulty.entries) {
-            e.hiScores[d.ordinal] = prefs.getInt("hi_${d.name}", if (d == Difficulty.NORMAL) legacyHi else 0)
+        s.mode = Mode.entries.getOrElse(prefs.getInt("mode", 0)) { Mode.CAMPAIGN }
+        for (m in Mode.entries) for (d in Difficulty.entries) {
+            val default = if (m == Mode.CAMPAIGN && d == Difficulty.NORMAL) legacyHi else 0
+            e.hiScores[e.hiIndex(m, d)] = prefs.getInt(hiKey(m, d), default)
         }
         e.applySize()
     }
+
+    private fun hiKey(m: Mode, d: Difficulty) = if (m == Mode.CAMPAIGN) "hi_${d.name}" else "hi_${m.name}_${d.name}"
 
     private fun saveState(e: Engine) {
         val s = e.settings
@@ -85,7 +90,8 @@ class MainActivity : ComponentActivity() {
             putBoolean("buttons", s.buttons)
             putInt("best_level", e.bestLevel)
             putInt("start_level", s.startLevel)
-            for (d in Difficulty.entries) putInt("hi_${d.name}", e.hiScores[d.ordinal])
+            putInt("mode", s.mode.ordinal)
+            for (m in Mode.entries) for (d in Difficulty.entries) putInt(hiKey(m, d), e.hiScores[e.hiIndex(m, d)])
         }.apply()
     }
 }

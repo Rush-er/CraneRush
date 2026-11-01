@@ -25,6 +25,12 @@ enum class Difficulty(
     INSANE("INSANE", 1.4f, 1.3f, 0.65f, 1, 5, 6, 2, 1.6f),
 }
 
+enum class Mode(val label: String) {
+    CAMPAIGN("CAMPAIGN"),     // 20 levels with bosses
+    BOMB_RUSH("BOMB RUSH"),   // survival: mostly bomb crates, speeds up over time
+    VERSUS("CRANE VS"),       // you are the crane, a CPU worker plays against you
+}
+
 /** Warehouse (playfield) size. */
 enum class Warehouse(val label: String, val cols: Int, val rows: Int) {
     SMALL("SMALL", 12, 8),
@@ -34,6 +40,7 @@ enum class Warehouse(val label: String, val cols: Int, val rows: Int) {
 }
 
 class Settings(
+    var mode: Mode = Mode.CAMPAIGN,
     var difficulty: Difficulty = Difficulty.NORMAL,
     var warehouse: Warehouse = Warehouse.LARGE,
     var startLevel: Int = 1,
@@ -90,9 +97,17 @@ class Engine(private val rng: Random = Random.Default) {
         const val STEEL = 2
         const val BOMB = 3
 
+        const val RUSH_FUSE = 3f
+        const val RUSH_LEVEL_TIME = 30f      // s per speed level in bomb rush
+        const val VS_TIME = 90f
+        const val VS_RELOAD = 1.2f
+        const val VS_CRANE_SPEED = 60f
+        const val VS_BOMB_EVERY = 5
+
         const val TITLE_Y = 38
-        const val SET_Y = 18
-        const val SET_STEP = 9
+        const val SET_Y = 17
+        const val SET_STEP = 10
+        const val MENU_STEP = 10
         const val SETTINGS_ITEMS = 7
         private val SETTING_LABELS = listOf("DIFFICULTY", "WAREHOUSE", "START LEVEL", "SOUND", "GHOSTING", "BUTTONS", "BACK")
 
@@ -123,11 +138,14 @@ class Engine(private val rng: Random = Random.Default) {
 
     // ---- settings & persistence ----
     val settings = Settings()
-    val hiScores = IntArray(Difficulty.entries.size)
+    /** Indexed by [hiIndex]. */
+    val hiScores = IntArray(Mode.entries.size * Difficulty.entries.size)
     var bestLevel = 1
     /** Set when settings / hi scores / best level change; the host saves and clears it. */
     var dirty = false
-    val hiScore get() = hiScores[settings.difficulty.ordinal]
+    val hiScore get() = hiScores[hiIndex(settings.mode, settings.difficulty)]
+    fun hiIndex(m: Mode, d: Difficulty) = m.ordinal * Difficulty.entries.size + d.ordinal
+    private val mode get() = settings.mode
     private val diff get() = settings.difficulty
 
     // ---- public state ----
@@ -162,6 +180,33 @@ class Engine(private val rng: Random = Random.Default) {
     private var spawnT = 0f
     private var levelLines = 0
     private var pendingLevelUp = false
+    private var elapsed = 0f
+
+    // ---- versus: the player's crane and the CPU worker ----
+    private var vsX = 0f
+    private var vsReload = 0f
+    private var vsDrops = 0
+    private var vsDrop = false
+    private var vsResult = ""
+    private var vsReason = ""
+    private var aiT = 0f
+    private var aiTarget = 0
+    private var aiTrapped = false
+    private val aiSeen = HashSet<Loose>()
+    private val danger = FloatArray(32)
+    private val vsCol get() = ((vsX - FIELD_X + CELL / 2f) / CELL).toInt().coerceIn(0, cols - 1)
+    private val vsNextType get() = if ((vsDrops + 1) % VS_BOMB_EVERY == 0) BOMB else WOOD
+    private val vsRowsToWin get() = when (diff) { Difficulty.EASY -> 6; Difficulty.NORMAL -> 5; else -> 4 }
+    private val aiReaction get() = when (diff) {
+        Difficulty.EASY -> 0.75f; Difficulty.NORMAL -> 0.4f; Difficulty.HARD -> 0.22f; Difficulty.INSANE -> 0.1f
+    }
+    private val aiSmash get() = when (diff) {
+        Difficulty.EASY -> 0.1f; Difficulty.NORMAL -> 0.4f; Difficulty.HARD -> 0.7f; Difficulty.INSANE -> 0.95f
+    }
+    private val aiMistake get() = when (diff) {
+        Difficulty.EASY -> 0.25f; Difficulty.NORMAL -> 0.1f; Difficulty.HARD -> 0.03f; Difficulty.INSANE -> 0f
+    }
+    private val fuseTime get() = if (mode == Mode.BOMB_RUSH) RUSH_FUSE else BOMB_FUSE
 
     // ---- player ----
     private var px = 0
@@ -208,8 +253,11 @@ class Engine(private val rng: Random = Random.Default) {
     val isRunning get() = state == State.PLAYING || state == State.BANNER || state == State.CLEARING || state == State.DYING
     val inMenu get() = !isRunning
 
-    fun pressStep(dir: Int) { if (state == State.PLAYING) queuedStep = dir }
-    fun pressJump() { if (state == State.PLAYING) queuedJump = true }
+    fun pressStep(dir: Int) { if (state == State.PLAYING && mode != Mode.VERSUS) queuedStep = dir }
+    fun pressJump() {
+        if (state != State.PLAYING) return
+        if (mode == Mode.VERSUS) vsDrop = true else queuedJump = true
+    }
 
     fun togglePause() {
         when (state) {
@@ -241,7 +289,9 @@ class Engine(private val rng: Random = Random.Default) {
     fun toggleSound() { settings.sound = !settings.sound; dirty = true }
 
     private val menuSize get() = when (state) {
-        State.TITLE, State.PAUSED -> 2
+        State.TITLE -> 3
+        State.PAUSED, State.GAME_OVER -> 2
+        State.WIN -> 1
         State.SETTINGS -> SETTINGS_ITEMS
         else -> 0
     }
@@ -256,17 +306,18 @@ class Engine(private val rng: Random = Random.Default) {
     fun menuAdjust(d: Int) {
         when (state) {
             State.SETTINGS -> adjustSetting(cursor, d)
-            State.TITLE, State.PAUSED -> menuMove(d)
+            State.TITLE -> if (cursor == 1) cycleMode(d) else menuMove(d)
+            State.PAUSED, State.GAME_OVER -> menuMove(d)
             else -> {}
         }
     }
 
     fun menuSelect() {
         when (state) {
-            State.TITLE -> if (cursor == 0) newGame() else openSettings()
+            State.TITLE -> when (cursor) { 0 -> newGame(); 1 -> cycleMode(1); else -> openSettings() }
             State.SETTINGS -> if (cursor == SETTINGS_ITEMS - 1) toTitle() else adjustSetting(cursor, 1)
             State.PAUSED -> if (cursor == 0) resume() else toTitle()
-            State.GAME_OVER -> if (timer > 0.8f) newGame()
+            State.GAME_OVER -> if (timer > 0.8f) { if (cursor == 0) newGame() else toTitle() }
             State.WIN -> if (timer > 1.5f) toTitle()
             else -> {}
         }
@@ -275,13 +326,36 @@ class Engine(private val rng: Random = Random.Default) {
     /** A tap in logical screen coordinates while a menu is shown. */
     fun tap(x: Float, y: Float) {
         when (state) {
-            State.TITLE -> if (itemAt(y, TITLE_Y, 8, 2) == 1) openSettings() else newGame()
+            State.TITLE -> {
+                if (abs(x - w / 2f) > titleButtonW / 2f + 2) return
+                when (itemAt(y, TITLE_Y, MENU_STEP, 3)) {
+                    0 -> { cursor = 0; newGame() }
+                    1 -> { cursor = 1; cycleMode(if (x < w / 2f) -1 else 1) }
+                    2 -> { cursor = 2; openSettings() }
+                }
+            }
             State.SETTINGS -> {
                 val i = itemAt(y, SET_Y, SET_STEP, SETTINGS_ITEMS)
-                if (i >= 0) { cursor = i; menuSelect() }
+                if (i < 0) return
+                cursor = i
+                val v = settingValue(i)
+                if (v == null) { menuSelect(); return }
+                // tapping the left half of the "< value >" control steps backwards
+                val vw = FrameBuffer.textWidth("< $v >")
+                val vx = w - 5 - vw
+                adjustSetting(i, if (x >= vx - 2 && x < vx + vw / 2f) -1 else 1)
             }
-            State.PAUSED -> if (itemAt(y, pauseTop + 11, 8, 2) == 1) toTitle() else resume()
-            State.GAME_OVER, State.WIN -> menuSelect()
+            State.PAUSED -> when (itemAt(y, pauseTop + 13, MENU_STEP, 2)) {
+                0 -> resume()
+                1 -> toTitle()
+            }
+            State.GAME_OVER -> {
+                if (itemAt(y, overTop + 26, MENU_STEP, 1) == 0 && abs(x - w / 2f) <= 36) {
+                    cursor = if (x < w / 2f) 0 else 1
+                    menuSelect()
+                }
+            }
+            State.WIN -> if (itemAt(y, overTop + 34, MENU_STEP, 1) == 0) menuSelect()
             else -> {}
         }
     }
@@ -295,6 +369,12 @@ class Engine(private val rng: Random = Random.Default) {
     private fun openSettings() { state = State.SETTINGS; cursor = 0; events.addLast(Sfx.MENU) }
 
     private fun <T> cycle(list: List<T>, cur: T, d: Int) = list[(list.indexOf(cur) + d + list.size) % list.size]
+
+    private fun cycleMode(d: Int) {
+        settings.mode = cycle(Mode.entries, settings.mode, d)
+        dirty = true
+        events.addLast(Sfx.MENU)
+    }
 
     private fun adjustSetting(i: Int, d: Int) {
         val s = settings
@@ -320,8 +400,22 @@ class Engine(private val rng: Random = Random.Default) {
         stepping = false; facing = 1
         queuedStep = 0; queuedJump = false
         spawnT = 1.0f
+        elapsed = 0f
         events.addLast(Sfx.START)
-        startLevel(settings.startLevel.coerceIn(1, bestLevel))
+        when (mode) {
+            Mode.CAMPAIGN -> startLevel(settings.startLevel.coerceIn(1, bestLevel))
+            Mode.BOMB_RUSH -> {
+                level = 1; boss = null
+                banner("BOMB RUSH", "SURVIVE!")
+            }
+            Mode.VERSUS -> {
+                level = 3; boss = null
+                vsX = colX(0).toFloat(); vsReload = 0.5f; vsDrops = 0; vsDrop = false
+                vsResult = ""; vsReason = ""
+                aiT = 0f; aiTarget = px; aiSeen.clear()
+                banner("CRANE VS WORKER", "YOU ARE THE CRANE", "JUMP: DROP")
+            }
+        }
     }
 
     private fun startLevel(l: Int) {
@@ -349,7 +443,7 @@ class Engine(private val rng: Random = Random.Default) {
 
     private fun advanceLevel() {
         if (level >= MAX_LEVEL) {
-            state = State.WIN; timer = 0f
+            state = State.WIN; timer = 0f; cursor = 0
             recordHi()
             events.addLast(Sfx.WIN)
         } else startLevel(level + 1)
@@ -361,8 +455,8 @@ class Engine(private val rng: Random = Random.Default) {
     }
 
     private fun recordHi() {
-        val d = diff.ordinal
-        if (score > hiScores[d]) { hiScores[d] = score; dirty = true }
+        val i = hiIndex(mode, diff)
+        if (score > hiScores[i]) { hiScores[i] = score; dirty = true }
     }
 
     fun update(dtIn: Float) {
@@ -374,8 +468,8 @@ class Engine(private val rng: Random = Random.Default) {
             State.PLAYING -> tick(dt)
             State.BANNER -> if (timer >= BANNER_TIME) state = State.PLAYING
             State.CLEARING -> if (timer >= CLEAR_TIME) finishClear()
-            State.DYING -> if (timer >= DIE_TIME) {
-                state = State.GAME_OVER; timer = 0f
+            State.DYING -> if (timer >= DIE_TIME || (mode == Mode.VERSUS && timer >= 1f)) {
+                state = State.GAME_OVER; timer = 0f; cursor = 0
                 recordHi()
             }
             else -> {}
@@ -383,6 +477,19 @@ class Engine(private val rng: Random = Random.Default) {
     }
 
     private fun tick(dt: Float) {
+        elapsed += dt
+        when (mode) {
+            Mode.BOMB_RUSH -> {
+                val l = min(MAX_LEVEL, 1 + (elapsed / RUSH_LEVEL_TIME).toInt())
+                if (l != level) { level = l; events.addLast(Sfx.LEVEL) }
+            }
+            Mode.VERSUS -> {
+                updateVsCrane(dt)
+                updateAi(dt)
+                if (elapsed >= VS_TIME) { workerWins("TIME UP"); return }
+            }
+            else -> {}
+        }
         updateCranes(dt)
         updatePlayer(dt)
         updateLoose(dt)
@@ -398,7 +505,7 @@ class Engine(private val rng: Random = Random.Default) {
 
     private fun updateCranes(dt: Float) {
         spawnT -= dt
-        if (boss == null && spawnT <= 0f && cranes.size < maxCranes) {
+        if (boss == null && mode != Mode.VERSUS && spawnT <= 0f && cranes.size < maxCranes) {
             spawnCrane()
             spawnT = spawnEvery * (0.7f + rng.nextFloat() * 0.6f)
         }
@@ -410,7 +517,7 @@ class Engine(private val rng: Random = Random.Default) {
                 val tx = colX(c.target).toFloat()
                 if ((c.dir > 0 && c.x >= tx) || (c.dir < 0 && c.x <= tx)) {
                     c.carrying = false
-                    loose.add(Loose(c.target, crateHangR, c.target, 1f, c.type, BOMB_FUSE))
+                    loose.add(Loose(c.target, crateHangR, c.target, 1f, c.type, fuseTime))
                 }
             }
             if (c.x < -CELL - 2 || c.x > w + 2) it.remove()
@@ -429,6 +536,10 @@ class Engine(private val rng: Random = Random.Default) {
 
     private fun craneCrateType(): Int {
         val s = diff.special
+        if (mode == Mode.BOMB_RUSH) {
+            val r = rng.nextFloat()
+            return when { r < 0.5f -> BOMB; r < 0.5f + 0.08f * s -> STEEL; else -> WOOD }
+        }
         val bomb = if (level >= BOMB_FROM) min(0.10f, 0.03f + 0.005f * (level - BOMB_FROM)) * s else 0f
         val steel = if (level >= STEEL_FROM) min(0.22f, 0.05f + 0.012f * (level - STEEL_FROM)) * s else 0f
         val r = rng.nextFloat()
@@ -671,12 +782,12 @@ class Engine(private val rng: Random = Random.Default) {
         val r = heights[col]
         if (r < grid[col].size) {
             grid[col][r] = l.type
-            fuse[col][r] = if (l.type == BOMB) (if (l.fuse > 0f) l.fuse else BOMB_FUSE) else 0f
+            fuse[col][r] = if (l.type == BOMB) (if (l.fuse > 0f) l.fuse else fuseTime) else 0f
         }
         heights[col]++
         score += 1
         events.addLast(Sfx.LAND)
-        if (heights[col] >= rows) die()
+        if (heights[col] >= rows) { if (mode == Mode.VERSUS) workerWins("OVERFLOW") else die() }
     }
 
     private fun checkCrush() {
@@ -777,8 +888,13 @@ class Engine(private val rng: Random = Random.Default) {
         lines++
         levelLines++
         score += 100 * level
-        if (boss != null) hitBoss()
-        else if (!isBossLevel(level) && levelLines >= diff.linesPerLevel) pendingLevelUp = true
+        when (mode) {
+            Mode.CAMPAIGN ->
+                if (boss != null) hitBoss()
+                else if (!isBossLevel(level) && levelLines >= diff.linesPerLevel) pendingLevelUp = true
+            Mode.VERSUS -> if (lines >= vsRowsToWin) { workerWins("ROWS CLEARED"); return }
+            Mode.BOMB_RUSH -> {}
+        }
         state = State.PLAYING
         checkRow() // chain clears
         if (state == State.PLAYING && pendingLevelUp) {
@@ -790,7 +906,140 @@ class Engine(private val rng: Random = Random.Default) {
     private fun die() {
         if (state == State.DYING) return
         state = State.DYING; timer = 0f
+        if (mode == Mode.VERSUS) {
+            vsResult = "YOU WIN!"; vsReason = "WORKER CRUSHED"
+            score = 1000 + ((VS_TIME - elapsed).coerceAtLeast(0f) * 10).toInt() + vsDrops
+            events.addLast(Sfx.WIN)
+        } else events.addLast(Sfx.DEATH)
+    }
+
+    private fun workerWins(reason: String) {
+        vsResult = "WORKER WINS"; vsReason = reason
+        score = 0
+        state = State.GAME_OVER; timer = 0f; cursor = 0
         events.addLast(Sfx.DEATH)
+    }
+
+    // ================= versus: player crane =================
+
+    private fun updateVsCrane(dt: Float) {
+        // Human input drives the crane; the worker's input is produced by the AI below.
+        val dir = (if (rightHeld) 1 else 0) - (if (leftHeld) 1 else 0)
+        val minX = colX(0).toFloat(); val maxX = colX(cols - 1).toFloat()
+        if (dir != 0) vsX = (vsX + dir * VS_CRANE_SPEED * dt).coerceIn(minX, maxX)
+        else {
+            val tx = colX(vsCol).toFloat()                  // glide onto the nearest column
+            val step = VS_CRANE_SPEED * dt
+            vsX = if (abs(tx - vsX) <= step) tx else vsX + sign(tx - vsX) * step
+        }
+        vsReload = max(0f, vsReload - dt)
+        if (vsDrop) {
+            vsDrop = false
+            if (vsReload <= 0f && heights[vsCol] < rows) {
+                val c = vsCol
+                loose.add(Loose(c, crateHangR, c, 1f, vsNextType, fuseTime))
+                vsDrops++
+                vsReload = VS_RELOAD
+                events.addLast(Sfx.PUSH)
+            }
+        }
+    }
+
+    // ================= versus: CPU worker =================
+
+    private fun updateAi(dt: Float) {
+        aiT -= dt
+        if (aiT <= 0f) {
+            aiT = aiReaction * (0.7f + rng.nextFloat() * 0.6f)
+            aiTarget = aiChooseTarget()
+            if (rng.nextFloat() < aiMistake) aiTarget = (px + rng.nextInt(5) - 2).coerceIn(0, cols - 1)
+        }
+        leftHeld = false; rightHeld = false
+
+        // A crate about to hit the head: maybe smash it (decided once per crate).
+        for (l in loose) {
+            if (l.col != px || l.slideT < 1f || l.type == STEEL || l.r <= py + 1f) continue
+            if (l.r - (py + 2f) < 1.6f && aiSeen.add(l) && phase == Phase.GROUND &&
+                ((aiTrapped && diff != Difficulty.EASY) || rng.nextFloat() < aiSmash)) {
+                queuedJump = true
+            }
+        }
+        aiSeen.retainAll(loose.toSet())
+
+        if (stepping || aiTarget == px) return
+        val dir = if (aiTarget > px) 1 else -1
+        val nx = px + dir
+        val feet = floor(py + EPS).toInt()
+        when {
+            phase == Phase.GROUND && heights[nx] == feet + 1 -> queuedJump = true      // climb: jump first...
+            phase == Phase.RISE || phase == Phase.HANG -> queuedStep = dir             // ...then step at the apex
+            dir < 0 -> leftHeld = true
+            else -> rightHeld = true
+        }
+    }
+
+    private fun aiChooseTarget(): Int {
+        // Earliest time a falling crate reaches head height in each column (for a worker standing on top of it).
+        val hit = danger
+        hit.fill(Float.MAX_VALUE)
+        val fall = crateFall
+        for (l in loose) {
+            if (l.slideT < 1f) continue
+            val t = (l.r - (heights[l.col] + 2f)) / fall
+            if (t < hit[l.col]) hit[l.col] = t
+        }
+        // Bomb blasts (plus shape) that would reach a worker standing on top of a column.
+        val bombNear = BooleanArray(cols)
+        fun markBlast(c: Int, r: Int) {
+            for (k in max(0, c - 1)..min(cols - 1, c + 1)) {
+                val feet = heights[k]
+                val reach = if (k == c) (r - 1)..(r + 1) else r..r
+                if (feet in reach || feet + 1 in reach) bombNear[k] = true
+            }
+        }
+        for (c in 0 until cols) for (r in 0 until heights[c]) {
+            if (grid[c][r] == BOMB && fuse[c][r] < 2.5f) markBlast(c, r)
+        }
+        for (l in loose) if (l.type == BOMB) markBlast(l.col, heights[l.col])
+        val cc = vsCol
+        val craneReady = vsReload < 0.4f
+
+        // columns reachable by walking / jumping one crate up
+        var lo = px
+        while (lo > 0 && heights[lo - 1] <= heights[lo] + 1) lo--
+        var hi = px
+        while (hi < cols - 1 && heights[hi + 1] <= heights[hi] + 1) hi++
+
+        var best = px
+        var bestScore = Float.MAX_VALUE
+        if (lo == hi) aiTrapped = true
+        for (c in lo..hi) {
+            var sc = 0f
+            // Walking there: don't pass under a crate that arrives while we're in that column.
+            val dir = if (c > px) 1 else -1
+            var t = 0f
+            var k = px
+            while (k != c) {
+                val prev = k
+                k += dir
+                t += STEP_TIME * 1.2f + (if (heights[k] > heights[prev]) 0.3f else 0f)
+                if (k != c && hit[k] < t + STEP_TIME + 0.15f) sc += 60f
+            }
+            // a crate will land on this column: deadly if it arrives before we could leave again
+            if (hit[c] < t + 0.45f) sc += 100f else if (hit[c] < Float.MAX_VALUE) sc += 15f
+            if (c == 0 || c == cols - 1) sc += 1.5f           // walls are easy to get cornered against
+            if (bombNear[c]) sc += 50f
+            if (c == cc) sc += if (craneReady) 12f else 5f    // right under the crane
+            else if (abs(c - cc) == 1) sc += 2f
+            sc += abs(c - px) * 0.8f - min(abs(c - cc), 5) * 0.6f + heights[c] * 0.3f
+            // pits (both neighbours 2+ higher) are traps
+            val l = if (c > 0) heights[c - 1] else 99
+            val r = if (c < cols - 1) heights[c + 1] else 99
+            if (l - heights[c] >= 2 && r - heights[c] >= 2) sc += 8f
+            if (sc < bestScore) { bestScore = sc; best = c }
+        }
+        aiTrapped = lo == hi || bestScore >= 60f
+        return best
     }
 
     // ================= test hooks =================
@@ -808,11 +1057,28 @@ class Engine(private val rng: Random = Random.Default) {
     internal fun testPlayerCol() = px
     internal fun testDrop(c: Int, r: Float, type: Int = WOOD) { loose.add(Loose(c, r, c, 1f, type, BOMB_FUSE)) }
     internal val testLooseCount get() = loose.size
+    internal fun testVsCol() = vsCol
+    internal val testVsReason get() = vsReason
 
     // ================= drawing =================
 
     private fun crateY(r: Float) = (h - (r + 1f) * CELL).roundToInt()
-    private val pauseTop get() = h / 2 - 14
+    private val pauseTop get() = h / 2 - 17
+    private val overTop get() = TOP + (h - TOP - 46) / 2
+    private val titleButtonW get() = min(w - 16, 76)
+
+    private fun settingValue(i: Int): String? {
+        val s = settings
+        return when (i) {
+            0 -> s.difficulty.label
+            1 -> s.warehouse.label
+            2 -> s.startLevel.toString()
+            3 -> if (s.sound) "ON" else "OFF"
+            4 -> if (s.ghosting) "ON" else "OFF"
+            5 -> if (s.buttons) "ON" else "OFF"
+            else -> null
+        }
+    }
 
     fun draw(fb: FrameBuffer) {
         fb.clear()
@@ -825,15 +1091,11 @@ class Engine(private val rng: Random = Random.Default) {
         drawHud(fb)
         when (state) {
             State.PAUSED -> {
-                val pw = 56; val x = (w - pw) / 2; val y = pauseTop
-                fb.panel(x, y, pw, 28)
+                val pw = 60; val x = (w - pw) / 2; val y = pauseTop
+                fb.panel(x, y, pw, 35)
                 fb.textCentered("PAUSED", y + 3)
-                fb.hline(x + 4, x + pw - 5, y + 9)
                 listOf("RESUME", "QUIT").forEachIndexed { i, s ->
-                    val iy = y + 12 + i * 8
-                    val tx = (w - FrameBuffer.textWidth(s)) / 2
-                    fb.text(s, tx, iy)
-                    if (i == cursor) fb.text(">", tx - 6, iy)
+                    fb.button(x + 6, y + 13 + i * MENU_STEP, pw - 13, s, i == cursor)
                 }
             }
             State.BANNER -> {
@@ -847,29 +1109,60 @@ class Engine(private val rng: Random = Random.Default) {
                 }
             }
             State.GAME_OVER -> {
-                val y = h / 2 - 20
-                fb.panel((w - 76) / 2, y, 76, 40)
-                fb.textCentered("GAME OVER", y + 3)
-                fb.textCentered("SCORE ${score.toString().padStart(6, '0')}", y + 11)
-                fb.textCentered("HI    ${hiScore.toString().padStart(6, '0')}", y + 17)
-                if (timer > 0.8f && (blinkT % 1f) < 0.6f) fb.textCentered("TAP TO RETRY", y + 25)
-                fb.textCentered("BACK: MENU", y + 32)
+                val y = overTop
+                fb.panel((w - 80) / 2, y, 80, 37)
+                when (mode) {
+                    Mode.VERSUS -> {
+                        if (vsResult != "YOU WIN!" || (blinkT % 0.6f) < 0.4f) fb.textCentered(vsResult, y + 3)
+                    }
+                    Mode.BOMB_RUSH -> fb.textCentered("OVER  ${clock(elapsed)}", y + 3)
+                    Mode.CAMPAIGN -> fb.textCentered("GAME OVER", y + 3)
+                }
+                if (mode == Mode.VERSUS) {
+                    fb.textCentered(vsReason, y + 11)
+                    fb.textCentered("SCORE ${score.toString().padStart(6, '0')}", y + 17)
+                } else {
+                    fb.textCentered("SCORE ${score.toString().padStart(6, '0')}", y + 11)
+                    fb.textCentered("HI    ${hiScore.toString().padStart(6, '0')}", y + 17)
+                }
+                if (timer > 0.8f) {
+                    fb.button(w / 2 - 35, y + 26, 33, "RETRY", cursor == 0)
+                    fb.button(w / 2 + 1, y + 26, 33, "MENU", cursor == 1)
+                }
             }
             State.WIN -> {
-                val y = h / 2 - 20
-                fb.panel((w - 84) / 2, y, 84, 40)
+                val y = overTop
+                fb.panel((w - 84) / 2, y, 84, 46)
                 if ((blinkT % 0.6f) < 0.4f) fb.textCentered("YOU WIN!", y + 3)
                 fb.textCentered("WAREHOUSE CLEAR", y + 10)
                 fb.textCentered("SCORE ${score.toString().padStart(6, '0')}", y + 18)
                 fb.textCentered("HI    ${hiScore.toString().padStart(6, '0')}", y + 24)
-                if (timer > 1.5f) fb.textCentered("TAP", y + 32)
+                if (timer > 1.5f) fb.button(w / 2 - 18, y + 34, 35, "MENU", true)
             }
             else -> {}
         }
     }
 
+    private fun clock(t: Float): String {
+        val s = t.toInt()
+        return "${s / 60}:${(s % 60).toString().padStart(2, '0')}"
+    }
+
     private fun drawHud(fb: FrameBuffer) {
+        if (mode == Mode.VERSUS) {
+            fb.text("ROWS ${min(lines, vsRowsToWin)}/$vsRowsToWin", 1, 1)
+            val t = clock((VS_TIME - elapsed).coerceAtLeast(0f))
+            fb.text(t, w - FrameBuffer.textWidth(t) - 1, 1)
+            return
+        }
         fb.text(score.toString().padStart(6, '0'), 1, 1)
+        if (mode == Mode.BOMB_RUSH) {
+            val t = clock(elapsed)
+            fb.text(t, w / 2 - FrameBuffer.textWidth(t) / 2, 1)
+            val lv = "LV$level"
+            fb.text(lv, w - FrameBuffer.textWidth(lv) - 1, 1)
+            return
+        }
         val lv = "LV$level"
         fb.text(lv, w - FrameBuffer.textWidth(lv) - 1, 1)
         val b = boss
@@ -927,12 +1220,13 @@ class Engine(private val rng: Random = Random.Default) {
         }
 
         drawBoss(fb)
+        if (mode == Mode.VERSUS) drawVsCrane(fb)
 
         // blasts
         for (b in blasts) if ((b.t * 20).toInt() % 2 == 0) fb.blit(Art.blast, colX(b.c), crateY(b.r.toFloat()))
 
         // player
-        val dying = state == State.DYING || state == State.GAME_OVER
+        val dying = state == State.DYING || (state == State.GAME_OVER && vsResult != "WORKER WINS")
         if (state == State.DYING && (timer * 8).toInt() % 2 == 1 && timer < 1f) return
         val sx = if (stepping) colX(stepFrom) + ((colX(px) - colX(stepFrom)) * stepT).roundToInt() else colX(px)
         val sy = (h - (py + 2f) * CELL).roundToInt()
@@ -943,6 +1237,16 @@ class Engine(private val rng: Random = Random.Default) {
             else -> Art.playerStand
         }
         fb.blit(sprite, sx, sy, flip = facing < 0)
+    }
+
+    private fun drawVsCrane(fb: FrameBuffer) {
+        val x = vsX.roundToInt()
+        // trolley above the rail marks the player's crane
+        fb.fill(x + 1, RAIL_Y - 3, 6, 3, true)
+        fb.set(x + 2, RAIL_Y - 1, false); fb.set(x + 5, RAIL_Y - 1, false)
+        fb.blit(Art.crane, x, RAIL_Y + 1)
+        if (vsReload <= 0f) drawCrate(fb, vsNextType, x, RAIL_Y + 4, BOMB_FUSE)
+        if ((blinkT % 0.5f) < 0.35f) fb.blit(Art.arrow, colX(vsCol) + 1, TOP - 4)
     }
 
     private fun drawBoss(fb: FrameBuffer) {
@@ -969,15 +1273,18 @@ class Engine(private val rng: Random = Random.Default) {
         fb.textCentered("CRATE RUSH", 24)
         fb.hline(w / 2 - 22, w / 2 + 21, 30)
 
-        listOf("PLAY", "SETTINGS").forEachIndexed { i, s ->
-            val y = TITLE_Y + i * 8
-            val tx = (w - FrameBuffer.textWidth(s)) / 2
-            if (i == cursor && (blinkT % 1f) > 0.7f) return@forEachIndexed
-            fb.text(s, tx, y)
-            if (i == cursor) { fb.text(">", tx - 6, y); fb.text("<", tx + FrameBuffer.textWidth(s) + 3, y) }
+        val bw = titleButtonW
+        val bx = (w - bw) / 2
+        listOf("PLAY", mode.label, "SETTINGS").forEachIndexed { i, s ->
+            val y = TITLE_Y + i * MENU_STEP
+            fb.button(bx, y, bw, s, i == cursor)
+            if (i == 1) {                                   // the mode button cycles: show arrows
+                fb.text("<", bx + 3, y, i != cursor)
+                fb.text(">", bx + bw - 6, y, i != cursor)
+            }
         }
-        fb.textCentered("HI ${hiScore.toString().padStart(6, '0')}", 56)
-        fb.textCentered("${diff.label} - ${settings.warehouse.label}", 62)
+        fb.textCentered("HI ${hiScore.toString().padStart(6, '0')}", 68)
+        fb.textCentered("${diff.label} - ${settings.warehouse.label}", 74)
 
         // little stack scene
         for ((c, hh) in listOf(0 to 2, 1 to 1, cols - 2 to 1, cols - 1 to 3)) for (r in 0 until hh) {
@@ -985,7 +1292,14 @@ class Engine(private val rng: Random = Random.Default) {
         }
         fb.blit(Art.playerStand, colX(cols / 2 - 1), h - 16)
         fb.blit(Art.crate, colX(cols / 2), crateY(0f))
-        if (h >= 112) fb.textCentered("SIDES:MOVE MID:JUMP", 72)
+        if (h >= 112) {
+            val hint = when (mode) {
+                Mode.CAMPAIGN -> "20 LEVELS - 4 BOSSES"
+                Mode.BOMB_RUSH -> "BOMBS! SURVIVE"
+                Mode.VERSUS -> "BE THE CRANE"
+            }
+            fb.textCentered(hint, 84)
+        }
     }
 
     private fun drawSettings(fb: FrameBuffer) {
@@ -995,28 +1309,25 @@ class Engine(private val rng: Random = Random.Default) {
         for (i in 0 until SETTINGS_ITEMS) {
             val y = SET_Y + i * SET_STEP
             val sel = i == cursor
-            if (sel) fb.text(">", 2, y)
-            fb.text(SETTING_LABELS[i], 7, y)
-            val v = when (i) {
-                0 -> s.difficulty.label
-                1 -> s.warehouse.label
-                2 -> s.startLevel.toString()
-                3 -> if (s.sound) "ON" else "OFF"
-                4 -> if (s.ghosting) "ON" else "OFF"
-                5 -> if (s.buttons) "ON" else "OFF"
-                else -> null
-            } ?: continue
-            val vs = if (sel) "<$v>" else v
-            fb.text(vs, w - FrameBuffer.textWidth(vs) - 3, y)
+            val v = settingValue(i)
+            if (v == null) {                                // BACK
+                fb.button((w - 40) / 2, y, 39, SETTING_LABELS[i], sel)
+                continue
+            }
+            fb.button(2, y, w - 5, "", sel)
+            fb.text(SETTING_LABELS[i], 5, y, !sel)
+            val vs = "< $v >"
+            fb.text(vs, w - 5 - FrameBuffer.textWidth(vs), y, !sel)
         }
         val hint = when (cursor) {
             0 -> "HI ${hiScore.toString().padStart(6, '0')}"
             1 -> "${cols}X$rows FLOOR"
             2 -> "BEST LV $bestLevel"
             5 -> if (s.buttons) "ON-SCREEN PAD" else "TOUCH ZONES"
-            else -> "TAP TO CHANGE"
+            SETTINGS_ITEMS - 1 -> "BACK TO TITLE"
+            else -> "TAP < > TO CHANGE"
         }
-        fb.hline(4, w - 5, h - 12)
-        fb.textCentered(hint, h - 8)
+        fb.hline(4, w - 5, h - 10)
+        fb.textCentered(hint, h - 7)
     }
 }
