@@ -27,12 +27,15 @@ class LcdRenderer(private val w: Int, private val h: Int) {
     private val src = Rect(0, 0, w, h)
     private val dst = Rect()
 
+    /** Slow pixel response; off = pixels switch instantly. */
+    @Volatile var ghosting = true
+
     /** Last computed LCD rectangle on screen, for touch mapping. */
     val screenRect = Rect()
 
     fun update(fb: FrameBuffer, dt: Float) {
-        val kOn = 1f - exp(-dt / 0.035f)
-        val kOff = 1f - exp(-dt / 0.06f)
+        val kOn = if (ghosting) 1f - exp(-dt / 0.035f) else 1f
+        val kOff = if (ghosting) 1f - exp(-dt / 0.06f) else 1f
         for (i in pixels.indices) {
             val t = if (fb.px[i]) 1f else 0f
             val cur = level[i]

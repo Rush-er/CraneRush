@@ -22,6 +22,7 @@ version rejects API 37, bump the plugin in `build.gradle.kts`.
 | Jump | tap middle, or swipe up anywhere | ↑ · W · Space · 2 5 · A/B button |
 | Pause | tap the score bar · Back | Enter · P · Start |
 | Mute | | M |
+| Menus | tap an item | ↑ ↓ select · ← → change · Space/Enter/A confirm · B/Back return |
 
 Move and jump can be combined with two fingers.
 
@@ -31,16 +32,37 @@ Move and jump can be combined with two fingers.
 - Walk, jump one crate high, push a single crate if nothing is on top of it
   and the cell beyond is free.
 - A full bottom row clears and the stack drops by one.
-- A crate on your head, or any column reaching the rail, ends the game.
-- Every 5 rows: level up (faster cranes and crates, up to 3 cranes at once).
+- A crate on your head, a bomb blast, or any column reaching the rail ends the game.
+- 20 levels. Clear the required rows (shown in the HUD) to advance.
+- **Steel crates** (from level 4) can't be pushed.
+- **Bomb crates** (from level 8) blink and explode 4 s after landing, destroying the
+  crates next to them (and you, if you're in the blast). Crates above fall down.
+- **Bosses** every 5th level replace the cranes. Every row you clear costs the boss 1 HP:
+  - LV5 FOREMAN: aims single crates at you.
+  - LV10 TWIN HOOK: drops pairs of crates.
+  - LV15 STEELER: steel and bomb crates.
+  - LV20 MEGA CRANE: fast volleys of mixed crates. Beat it to win.
 
-Scoring: landed crate +1, push +2, row clear +100 × level.
+Scoring: landed crate +1, push +2, crate destroyed by a bomb +3, row clear +100 × level,
+boss defeated +500 × level.
+
+## Settings
+
+| Setting | Options |
+|---|---|
+| Difficulty | EASY · NORMAL · HARD · INSANE: crane/crate speed, cranes at once, rows per level, boss HP, special crate rate. Separate hi score for each. |
+| Warehouse | SMALL 12×8 (original) · MEDIUM 14×10 · LARGE 16×11 (default) · HUGE 20×12 |
+| Start level | any level you have reached |
+| Sound | on / off |
+| Ghosting | LCD pixel ghosting effect on / off |
+
+Settings, hi scores and best level are saved.
 
 ## Layout
 
 ```
 app/src/main/java/it/bitwire/craterush/
-  game/Engine.kt    rules, physics, state machine, drawing to a 1-bit framebuffer (no Android deps)
+  game/Engine.kt    rules, physics, bosses, menus, drawing to a 1-bit framebuffer (no Android deps)
   game/Gfx.kt       framebuffer, 3x5 font, sprites
   LcdRenderer.kt    LCD look: pixel ghosting, grid, integer scaling, bezel
   Beeper.kt         square-wave sound via AudioTrack
@@ -48,4 +70,7 @@ app/src/main/java/it/bitwire/craterush/
   MainActivity.kt   immersive mode, back handling, hi-score persistence
 ```
 
-Logical resolution is 100×88; the 12×8 playfield uses 8×8 px cells.
+Playfield cells are 8×8 px; the logical resolution depends on the warehouse size
+(4 + cols×8 by 32 + rows×8, e.g. 132×120 for LARGE).
+
+Tests: `./gradlew testDebugUnitTest` (engine simulation, no device needed).

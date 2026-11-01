@@ -13,22 +13,25 @@ import kotlin.math.abs
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
 
     val engine = Engine()
-    private val fb = FrameBuffer(Engine.W, Engine.H)
-    private val lcd = LcdRenderer(Engine.W, Engine.H)
+    // Recreated whenever the warehouse size (and thus the logical resolution) changes.
+    @Volatile private var fb = FrameBuffer(engine.w, engine.h)
+    @Volatile private var lcd = LcdRenderer(engine.w, engine.h)
     val beeper = Beeper()
 
     @Volatile private var running = false
     @Volatile private var surfaceReady = false
     private var thread: Thread? = null
 
-    /** Called on the game thread whenever the hi score improves. */
-    var onHiScore: ((Int) -> Unit)? = null
+    /** Called on the game thread (holding the engine lock) when settings / scores need saving. */
+    var onSave: ((Engine) -> Unit)? = null
 
     // ---- input sources, OR-ed together every frame ----
     private var keyLeft = false
     private var keyRight = false
     private var axisLeft = false
     private var axisRight = false
+    private var hatX = 0
+    private var hatY = 0
     private val touchZone = HashMap<Int, Zone>()
     private val touchStart = HashMap<Int, Pair<Float, Float>>()
     private val touchSwiped = HashSet<Int>()
@@ -70,25 +73,33 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     override fun run() {
         var last = System.nanoTime()
-        var lastHi = engine.hiScore
         while (running) {
             val now = System.nanoTime()
             val dt = (now - last) / 1e9f
             last = now
 
+            val frame: FrameBuffer
+            val screen: LcdRenderer
             synchronized(engine) {
                 engine.leftHeld = keyLeft || axisLeft || touchZone.values.any { it == Zone.LEFT }
                 engine.rightHeld = keyRight || axisRight || touchZone.values.any { it == Zone.RIGHT }
                 engine.update(dt)
-                engine.draw(fb)
+                if (fb.w != engine.w || fb.h != engine.h) {
+                    fb = FrameBuffer(engine.w, engine.h)
+                    lcd = LcdRenderer(engine.w, engine.h)
+                }
+                frame = fb; screen = lcd
+                engine.draw(frame)
+                beeper.muted = !engine.settings.sound
+                screen.ghosting = engine.settings.ghosting
                 while (engine.events.isNotEmpty()) beeper.play(engine.events.removeFirst())
-                if (engine.hiScore != lastHi) { lastHi = engine.hiScore; onHiScore?.invoke(lastHi) }
+                if (engine.dirty) { engine.dirty = false; onSave?.invoke(engine) }
             }
-            lcd.update(fb, dt)
+            screen.update(frame, dt)
 
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null }
             if (canvas != null) {
-                try { lcd.draw(canvas) } finally { holder.unlockCanvasAndPost(canvas) }
+                try { screen.draw(canvas) } finally { holder.unlockCanvasAndPost(canvas) }
             }
 
             // Guard against spinning if vsync isn't throttling us (cap ~120 fps).
@@ -106,8 +117,11 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                     val x = e.getX(idx); val y = e.getY(idx)
-                    if (!engine.isRunning) {
-                        engine.pressStart()
+                    if (engine.inMenu) {
+                        val r = lcd.screenRect
+                        if (!r.isEmpty) {
+                            engine.tap((x - r.left) * engine.w / r.width(), (y - r.top) * engine.h / r.height())
+                        }
                         return true
                     }
                     val zone = zoneFor(x, y)
@@ -165,29 +179,41 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     // ================= keys & gamepad =================
 
+    private val leftKeys = setOf(KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_4, KeyEvent.KEYCODE_NUMPAD_4)
+    private val rightKeys = setOf(KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_NUMPAD_6)
+    private val upKeys = setOf(KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_NUMPAD_2)
+    private val downKeys = setOf(KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_S, KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_NUMPAD_8)
+    private val actionKeys = setOf(
+        KeyEvent.KEYCODE_SPACE, KeyEvent.KEYCODE_5, KeyEvent.KEYCODE_NUMPAD_5,
+        KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B, KeyEvent.KEYCODE_DPAD_CENTER,
+    )
+    private val startKeys = setOf(KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_START)
+
     fun handleKey(code: Int, down: Boolean, repeat: Int): Boolean {
         synchronized(engine) {
-            when (code) {
-                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_A, KeyEvent.KEYCODE_4,
-                KeyEvent.KEYCODE_NUMPAD_4 -> { keyLeft = down; return true }
-                KeyEvent.KEYCODE_DPAD_RIGHT, KeyEvent.KEYCODE_D, KeyEvent.KEYCODE_6,
-                KeyEvent.KEYCODE_NUMPAD_6 -> { keyRight = down; return true }
-                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_W, KeyEvent.KEYCODE_SPACE,
-                KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_5, KeyEvent.KEYCODE_NUMPAD_2,
-                KeyEvent.KEYCODE_NUMPAD_5, KeyEvent.KEYCODE_BUTTON_A, KeyEvent.KEYCODE_BUTTON_B,
-                KeyEvent.KEYCODE_DPAD_CENTER -> {
-                    if (down && repeat == 0) engine.pressJump(); return true
+            // Held-direction state is always tracked so releasing a key in a menu doesn't leave it stuck.
+            if (code in leftKeys) keyLeft = down
+            if (code in rightKeys) keyRight = down
+            val first = down && repeat == 0
+
+            if (engine.inMenu) {
+                when {
+                    code in leftKeys -> { if (down) engine.menuAdjust(-1); return true }
+                    code in rightKeys -> { if (down) engine.menuAdjust(1); return true }
+                    code in upKeys -> { if (down) engine.menuMove(-1); return true }
+                    code in downKeys -> { if (down) engine.menuMove(1); return true }
+                    code == KeyEvent.KEYCODE_BUTTON_B -> { if (first) engine.back(); return true }
+                    code in actionKeys || code in startKeys -> { if (first) engine.menuSelect(); return true }
+                    code == KeyEvent.KEYCODE_P -> { if (first) engine.togglePause(); return true }
                 }
-                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_START -> {
-                    if (down && repeat == 0) {
-                        if (engine.isRunning || engine.state == Engine.State.PAUSED) engine.togglePause()
-                        else engine.pressStart()
-                    }
-                    return true
+            } else {
+                when {
+                    code in leftKeys || code in rightKeys || code in downKeys -> return true
+                    code in upKeys || code in actionKeys -> { if (first) engine.pressJump(); return true }
+                    code in startKeys || code == KeyEvent.KEYCODE_P -> { if (first) engine.togglePause(); return true }
                 }
-                KeyEvent.KEYCODE_P -> { if (down && repeat == 0) engine.togglePause(); return true }
-                KeyEvent.KEYCODE_M -> { if (down && repeat == 0) beeper.muted = !beeper.muted; return true }
             }
+            if (code == KeyEvent.KEYCODE_M) { if (first) engine.toggleSound(); return true }
         }
         return false
     }
@@ -196,16 +222,23 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         if (e.source and InputDevice.SOURCE_JOYSTICK != InputDevice.SOURCE_JOYSTICK ||
             e.actionMasked != MotionEvent.ACTION_MOVE) return false
         val x = e.getAxisValue(MotionEvent.AXIS_X).let { if (abs(it) > 0.5f) it else e.getAxisValue(MotionEvent.AXIS_HAT_X) }
-        val y = e.getAxisValue(MotionEvent.AXIS_HAT_Y)
+        val y = e.getAxisValue(MotionEvent.AXIS_HAT_Y).let { if (abs(it) > 0.5f) it else e.getAxisValue(MotionEvent.AXIS_Y) }
+        val nx = if (x < -0.5f) -1 else if (x > 0.5f) 1 else 0
+        val ny = if (y < -0.5f) -1 else if (y > 0.5f) 1 else 0
         synchronized(engine) {
-            axisLeft = x < -0.5f
-            axisRight = x > 0.5f
-            if (y < -0.5f) engine.pressJump()
+            if (engine.inMenu) {
+                axisLeft = false; axisRight = false
+                if (nx != 0 && nx != hatX) engine.menuAdjust(nx)
+                if (ny != 0 && ny != hatY) engine.menuMove(ny)
+            } else {
+                axisLeft = nx < 0
+                axisRight = nx > 0
+                if (ny < 0 && hatY >= 0) engine.pressJump()
+            }
+            hatX = nx; hatY = ny
         }
         return true
     }
 
-    fun handleBack(): Boolean = synchronized(engine) {
-        if (engine.isRunning) { engine.pause(); true } else false
-    }
+    fun handleBack(): Boolean = synchronized(engine) { engine.back() }
 }

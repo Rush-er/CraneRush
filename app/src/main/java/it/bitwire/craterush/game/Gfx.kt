@@ -24,9 +24,11 @@ class FrameBuffer(val w: Int, val h: Int) {
         vline(x, y, y + h - 1); vline(x + w - 1, y, y + h - 1)
     }
 
-    fun blit(s: Sprite, x: Int, y: Int, flip: Boolean = false) {
+    /** Draws a sprite; with [invert] the sprite's box is filled and its set pixels are cleared. */
+    fun blit(s: Sprite, x: Int, y: Int, flip: Boolean = false, invert: Boolean = false) {
         for (sy in 0 until s.h) for (sx in 0 until s.w) {
-            if (s.bits[sy * s.w + (if (flip) s.w - 1 - sx else sx)]) set(x + sx, y + sy)
+            val on = s.bits[sy * s.w + (if (flip) s.w - 1 - sx else sx)]
+            if (invert) set(x + sx, y + sy, !on) else if (on) set(x + sx, y + sy)
         }
     }
 
@@ -50,6 +52,7 @@ class FrameBuffer(val w: Int, val h: Int) {
 class Sprite(rows: List<String>) {
     val w = rows[0].length
     val h = rows.size
+    init { require(rows.all { it.length == w }) { "ragged sprite" } }
     val bits = BooleanArray(w * h) { rows[it / w][it % w] == '#' }
 }
 
@@ -71,7 +74,8 @@ object Font {
         'V' to "#.# #.# #.# #.# .#.", 'W' to "#.# #.# ### ### #.#", 'X' to "#.# #.# .#. #.# #.#",
         'Y' to "#.# #.# .#. .#. .#.", 'Z' to "### ..# .#. #.. ###",
         ' ' to "... ... ... ... ...", ':' to "... .#. ... .#. ...", '-' to "... ... ### ... ...",
-        '!' to ".#. .#. .#. ... .#.", '.' to "... ... ... ... .#.", '/' to "..# ..# .#. #.. #.."
+        '!' to ".#. .#. .#. ... .#.", '.' to "... ... ... ... .#.", '/' to "..# ..# .#. #.. #..",
+        '<' to "..# .#. #.. .#. ..#", '>' to "#.. .#. ..# .#. #.."
     )
 
     private val glyphs: Map<Char, BooleanArray> = raw.mapValues { (c, s) ->
@@ -160,4 +164,103 @@ object Art {
         "#.#..#.#",
         "...##...",
     ))
+
+    val steel = Sprite(listOf(
+        "########",
+        "#.####.#",
+        "##.##.##",
+        "###..###",
+        "###..###",
+        "##.##.##",
+        "#.####.#",
+        "########",
+    ))
+
+    val bomb = Sprite(listOf(
+        "########",
+        "#....#.#",
+        "#..##..#",
+        "#.####.#",
+        "#.####.#",
+        "#..##..#",
+        "#......#",
+        "########",
+    ))
+
+    val blast = Sprite(listOf(
+        "#..##..#",
+        ".#.##.#.",
+        "..####..",
+        "########",
+        "########",
+        "..####..",
+        ".#.##.#.",
+        "#..##..#",
+    ))
+
+    val arrow = Sprite(listOf(
+        "######",
+        ".####.",
+        "..##..",
+    ))
+
+    /** Bosses, 16x11: a cab above the rail, the rail row, then two hooks over two columns. */
+    val bosses = listOf(
+        // FOREMAN: hard hat and frown
+        Sprite(listOf(
+            "....########....",
+            "...#.######.#...",
+            "..############..",
+            "..#.##....##.#..",
+            "..#....##....#..",
+            "..#..######..#..",
+            "...##########...",
+            "################",
+            "...##......##...",
+            "...##......##...",
+            "..####....####..",
+        )),
+        // TWIN HOOK: two heads
+        Sprite(listOf(
+            ".######..######.",
+            "#.#..#.##.#..#.#",
+            "#......##......#",
+            "#.####.##.####.#",
+            "#......##......#",
+            ".######..######.",
+            "..#..#....#..#..",
+            "################",
+            "...##......##...",
+            "..#..#....#..#..",
+            "..#..#....#..#..",
+        )),
+        // STEELER: robot
+        Sprite(listOf(
+            "..############..",
+            "..#..........#..",
+            "..#.###..###.#..",
+            "..#.#.#..#.#.#..",
+            "..#.###..###.#..",
+            "..#..######..#..",
+            "..############..",
+            "################",
+            "...##......##...",
+            "..####....####..",
+            "..#..#....#..#..",
+        )),
+        // MEGA CRANE: skull
+        Sprite(listOf(
+            "#.############.#",
+            ".##############.",
+            "##..##....##..##",
+            "##..##....##..##",
+            "######.##.######",
+            ".####......####.",
+            "..#.#.#..#.#.#..",
+            "################",
+            "..####....####..",
+            "..#..#....#..#..",
+            "..#..#....#..#..",
+        )),
+    )
 }

@@ -8,6 +8,9 @@ import androidx.activity.OnBackPressedCallback
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import it.bitwire.craterush.game.Difficulty
+import it.bitwire.craterush.game.Engine
+import it.bitwire.craterush.game.Warehouse
 
 class MainActivity : ComponentActivity() {
 
@@ -19,8 +22,8 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         game = GameView(this)
-        game.engine.hiScore = prefs.getInt(KEY_HI, 0)
-        game.onHiScore = { hi -> prefs.edit().putInt(KEY_HI, hi).apply() }
+        loadState(game.engine)
+        game.onSave = ::saveState
         setContentView(game)
         game.requestFocus()
 
@@ -56,5 +59,31 @@ class MainActivity : ComponentActivity() {
     override fun onGenericMotionEvent(event: MotionEvent): Boolean =
         game.handleMotion(event) || super.onGenericMotionEvent(event)
 
-    companion object { private const val KEY_HI = "hi_score" }
+    private fun loadState(e: Engine) = synchronized(e) {
+        val s = e.settings
+        s.difficulty = Difficulty.entries.getOrElse(prefs.getInt("difficulty", Difficulty.NORMAL.ordinal)) { Difficulty.NORMAL }
+        s.warehouse = Warehouse.entries.getOrElse(prefs.getInt("warehouse", Warehouse.LARGE.ordinal)) { Warehouse.LARGE }
+        s.sound = prefs.getBoolean("sound", true)
+        s.ghosting = prefs.getBoolean("ghosting", true)
+        e.bestLevel = prefs.getInt("best_level", 1).coerceIn(1, Engine.MAX_LEVEL)
+        s.startLevel = prefs.getInt("start_level", 1).coerceIn(1, e.bestLevel)
+        val legacyHi = prefs.getInt("hi_score", 0) // single hi score from version 1.0
+        for (d in Difficulty.entries) {
+            e.hiScores[d.ordinal] = prefs.getInt("hi_${d.name}", if (d == Difficulty.NORMAL) legacyHi else 0)
+        }
+        e.applySize()
+    }
+
+    private fun saveState(e: Engine) {
+        val s = e.settings
+        prefs.edit().apply {
+            putInt("difficulty", s.difficulty.ordinal)
+            putInt("warehouse", s.warehouse.ordinal)
+            putBoolean("sound", s.sound)
+            putBoolean("ghosting", s.ghosting)
+            putInt("best_level", e.bestLevel)
+            putInt("start_level", s.startLevel)
+            for (d in Difficulty.entries) putInt("hi_${d.name}", e.hiScores[d.ordinal])
+        }.apply()
+    }
 }
