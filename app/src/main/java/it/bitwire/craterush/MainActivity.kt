@@ -65,6 +65,7 @@ class MainActivity : ComponentActivity() {
         s.warehouse = Warehouse.entries.getOrElse(prefs.getInt("warehouse", Warehouse.LARGE.ordinal)) { Warehouse.LARGE }
         s.sound = prefs.getBoolean("sound", true)
         s.ghosting = prefs.getBoolean("ghosting", true)
+        s.buttons = prefs.getBoolean("buttons", true)
         e.bestLevel = prefs.getInt("best_level", 1).coerceIn(1, Engine.MAX_LEVEL)
         s.startLevel = prefs.getInt("start_level", 1).coerceIn(1, e.bestLevel)
         val legacyHi = prefs.getInt("hi_score", 0) // single hi score from version 1.0
@@ -81,6 +82,7 @@ class MainActivity : ComponentActivity() {
             putInt("warehouse", s.warehouse.ordinal)
             putBoolean("sound", s.sound)
             putBoolean("ghosting", s.ghosting)
+            putBoolean("buttons", s.buttons)
             putInt("best_level", e.bestLevel)
             putInt("start_level", s.startLevel)
             for (d in Difficulty.entries) putInt("hi_${d.name}", e.hiScores[d.ordinal])

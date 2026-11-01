@@ -39,6 +39,7 @@ class Settings(
     var startLevel: Int = 1,
     var sound: Boolean = true,
     var ghosting: Boolean = true,
+    var buttons: Boolean = true,      // on-screen buttons
 )
 
 enum class BossKind(val label: String, val baseHp: Int) {
@@ -92,8 +93,8 @@ class Engine(private val rng: Random = Random.Default) {
         const val TITLE_Y = 38
         const val SET_Y = 18
         const val SET_STEP = 9
-        const val SETTINGS_ITEMS = 6
-        private val SETTING_LABELS = listOf("DIFFICULTY", "WAREHOUSE", "START LEVEL", "SOUND", "GHOSTING", "BACK")
+        const val SETTINGS_ITEMS = 7
+        private val SETTING_LABELS = listOf("DIFFICULTY", "WAREHOUSE", "START LEVEL", "SOUND", "GHOSTING", "BUTTONS", "BACK")
 
         private const val EPS = 1e-4f
         private val PLUS = listOf(0 to 0, 1 to 0, -1 to 0, 0 to 1, 0 to -1)
@@ -102,7 +103,7 @@ class Engine(private val rng: Random = Random.Default) {
     }
 
     enum class State { TITLE, SETTINGS, PLAYING, PAUSED, BANNER, CLEARING, DYING, GAME_OVER, WIN }
-    enum class Sfx { START, JUMP, PUSH, LAND, CLEAR, LEVEL, DEATH, MENU, BOSS, HIT, BOSS_DOWN, BOOM, WIN }
+    enum class Sfx { START, JUMP, PUSH, LAND, CLEAR, LEVEL, DEATH, MENU, BOSS, HIT, BOSS_DOWN, BOOM, WIN, SMASH }
     private enum class Phase { GROUND, RISE, HANG, FALL }
     private enum class BPhase { MOVE, AIM, COOL, DEAD }
 
@@ -303,6 +304,7 @@ class Engine(private val rng: Random = Random.Default) {
             2 -> s.startLevel = ((s.startLevel - 1 + d + bestLevel) % bestLevel) + 1
             3 -> s.sound = !s.sound
             4 -> s.ghosting = !s.ghosting
+            5 -> s.buttons = !s.buttons
             else -> return
         }
         dirty = true
@@ -336,7 +338,7 @@ class Engine(private val rng: Random = Random.Default) {
             boss = null
             val hint = when (l) {
                 1 -> listOf("GET READY")
-                STEEL_FROM -> listOf("STEEL CRATES", "NO PUSHING")
+                STEEL_FROM -> listOf("STEEL CRATES", "NO PUSH OR SMASH")
                 BOMB_FROM -> listOf("BOMB CRATES", "STAND CLEAR!")
                 else -> emptyList()
             }
@@ -575,8 +577,9 @@ class Engine(private val rng: Random = Random.Default) {
             else if (leftHeld != rightHeld) dir = if (leftHeld) -1 else 1
             if (dir != 0) {
                 facing = dir
-                // A sideways tap during the rise is kept until it can be taken (apex).
-                if (!tryStep(dir) && buffered && phase == Phase.RISE) queuedStep = dir
+                // A sideways tap during the rise (or together with a jump) is kept until it can be
+                // taken at the apex, e.g. to push a crate sitting on top of another one.
+                if (!tryStep(dir) && buffered && (phase == Phase.RISE || queuedJump)) queuedStep = dir
             }
         }
 
@@ -622,8 +625,9 @@ class Engine(private val rng: Random = Random.Default) {
         val blocked = (fy..topRow).any { occupied(nx, it) }
         if (!blocked) { beginStep(nx); return true }
 
-        // push: grounded, crate at feet level is the top of its column, space beyond, not steel
-        if (phase != Phase.GROUND || !isIntegral(py)) return false
+        // push: feet level with the top crate of the next column (standing, or at the top of
+        // a jump, which is how a crate sitting on another one is reached), space beyond, not steel
+        if ((phase != Phase.GROUND && phase != Phase.HANG) || !isIntegral(py)) return false
         val nx2 = nx + dir
         if (nx2 !in 0 until cols) return false
         val type = grid[nx][fy]
@@ -676,8 +680,19 @@ class Engine(private val rng: Random = Random.Default) {
     }
 
     private fun checkCrush() {
-        for (l in loose) {
+        val it = loose.iterator()
+        while (it.hasNext()) {
+            val l = it.next()
             if (l.col == px && l.slideT >= 1f && l.r < py + 2f - 0.05f && l.r + 1f > py + 0.05f) {
+                // Jumping into a falling crate smashes it with the head (not steel).
+                if ((phase == Phase.RISE || phase == Phase.HANG) && l.type != STEEL && l.r > py + 1f) {
+                    it.remove()
+                    blasts.add(Blast(px, floor(l.r + 0.5f).toInt()))
+                    score += 5
+                    phase = Phase.FALL
+                    events.addLast(Sfx.SMASH)
+                    continue
+                }
                 die(); return
             }
         }
@@ -791,6 +806,8 @@ class Engine(private val rng: Random = Random.Default) {
     internal val testBossHp get() = boss?.hp
     internal fun testSkipBanner() { if (state == State.BANNER) state = State.PLAYING }
     internal fun testPlayerCol() = px
+    internal fun testDrop(c: Int, r: Float, type: Int = WOOD) { loose.add(Loose(c, r, c, 1f, type, BOMB_FUSE)) }
+    internal val testLooseCount get() = loose.size
 
     // ================= drawing =================
 
@@ -986,6 +1003,7 @@ class Engine(private val rng: Random = Random.Default) {
                 2 -> s.startLevel.toString()
                 3 -> if (s.sound) "ON" else "OFF"
                 4 -> if (s.ghosting) "ON" else "OFF"
+                5 -> if (s.buttons) "ON" else "OFF"
                 else -> null
             } ?: continue
             val vs = if (sel) "<$v>" else v
@@ -995,6 +1013,7 @@ class Engine(private val rng: Random = Random.Default) {
             0 -> "HI ${hiScore.toString().padStart(6, '0')}"
             1 -> "${cols}X$rows FLOOR"
             2 -> "BEST LV $bestLevel"
+            5 -> if (s.buttons) "ON-SCREEN PAD" else "TOUCH ZONES"
             else -> "TAP TO CHANGE"
         }
         fb.hline(4, w - 5, h - 12)

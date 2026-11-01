@@ -46,17 +46,18 @@ class LcdRenderer(private val w: Int, private val h: Int) {
         bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
     }
 
-    fun draw(canvas: Canvas) {
-        val cw = canvas.width
-        val ch = canvas.height
+    /** Draws the bezel over the whole canvas and the LCD centred in [area]. */
+    fun draw(canvas: Canvas, area: Rect) {
+        val cw = area.width()
+        val ch = area.height()
         canvas.drawColor(bezel)
         val margin = (min(cw, ch) * 0.04f).toInt()
         var scale = min((cw - 2 * margin) / w, (ch - 2 * margin) / h)
         scale = max(scale, 1)
         val dw = w * scale
         val dh = h * scale
-        val left = (cw - dw) / 2
-        val top = (ch - dh) / 2
+        val left = area.left + (cw - dw) / 2
+        val top = area.top + (ch - dh) / 2
         dst.set(left, top, left + dw, top + dh)
         screenRect.set(dst)
 

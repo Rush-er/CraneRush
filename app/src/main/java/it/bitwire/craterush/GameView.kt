@@ -1,6 +1,7 @@
 package it.bitwire.craterush
 
 import android.content.Context
+import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -35,6 +36,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private val touchZone = HashMap<Int, Zone>()
     private val touchStart = HashMap<Int, Pair<Float, Float>>()
     private val touchSwiped = HashSet<Int>()
+    private val touchButton = HashMap<Int, Controls.Btn>()
     private val swipePx = 36f * resources.displayMetrics.density
 
     private enum class Zone { LEFT, CENTER, RIGHT, TOP }
@@ -80,15 +82,22 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
             val frame: FrameBuffer
             val screen: LcdRenderer
+            val pressed: Set<Controls.Btn>
+            val buttonsOn: Boolean
             synchronized(engine) {
-                engine.leftHeld = keyLeft || axisLeft || touchZone.values.any { it == Zone.LEFT }
-                engine.rightHeld = keyRight || axisRight || touchZone.values.any { it == Zone.RIGHT }
+                engine.leftHeld = keyLeft || axisLeft || touchZone.values.any { it == Zone.LEFT } ||
+                    touchButton.values.any { it == Controls.Btn.LEFT }
+                engine.rightHeld = keyRight || axisRight || touchZone.values.any { it == Zone.RIGHT } ||
+                    touchButton.values.any { it == Controls.Btn.RIGHT }
                 engine.update(dt)
                 if (fb.w != engine.w || fb.h != engine.h) {
                     fb = FrameBuffer(engine.w, engine.h)
                     lcd = LcdRenderer(engine.w, engine.h)
                 }
                 frame = fb; screen = lcd
+                pressed = touchButton.values.toSet()
+                buttonsOn = engine.settings.buttons
+                if (!buttonsOn && touchButton.isNotEmpty()) touchButton.clear()
                 engine.draw(frame)
                 beeper.muted = !engine.settings.sound
                 screen.ghosting = engine.settings.ghosting
@@ -99,7 +108,11 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
             val canvas = try { holder.lockHardwareCanvas() } catch (_: Exception) { null }
             if (canvas != null) {
-                try { screen.draw(canvas) } finally { holder.unlockCanvasAndPost(canvas) }
+                try {
+                    val controls = Controls.layout(canvas.width, canvas.height, buttonsOn)
+                    screen.draw(canvas, controls.lcdArea)
+                    controls.draw(canvas, pressed)
+                } finally { holder.unlockCanvasAndPost(canvas) }
             }
 
             // Guard against spinning if vsync isn't throttling us (cap ~120 fps).
@@ -117,6 +130,13 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                     val x = e.getX(idx); val y = e.getY(idx)
+                    val controls = Controls.layout(width, height, engine.settings.buttons)
+                    val btn = controls.hit(x, y)
+                    if (btn != null) {
+                        pressButton(id, btn)
+                        return true
+                    }
+                    if (controls.inControlArea(x, y)) return true   // dead space around the buttons
                     if (engine.inMenu) {
                         val r = lcd.screenRect
                         if (!r.isEmpty) {
@@ -133,8 +153,20 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                     }
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val controls = Controls.layout(width, height, engine.settings.buttons)
                     for (i in 0 until e.pointerCount) {
                         val pid = e.getPointerId(i)
+                        // Sliding a finger between the left and right buttons switches direction.
+                        val held = touchButton[pid]
+                        if (held == Controls.Btn.LEFT || held == Controls.Btn.RIGHT) {
+                            val now = controls.hit(e.getX(i), e.getY(i))
+                            if ((now == Controls.Btn.LEFT || now == Controls.Btn.RIGHT) && now != held) {
+                                touchButton[pid] = now
+                                if (engine.inMenu) engine.menuAdjust(if (now == Controls.Btn.LEFT) -1 else 1)
+                                performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                            }
+                            continue
+                        }
                         val start = touchStart[pid] ?: continue
                         if (pid in touchSwiped) continue
                         val dx = e.getX(i) - start.first
@@ -156,12 +188,31 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     override fun performClick(): Boolean = super.performClick()
 
+    private fun pressButton(id: Int, btn: Controls.Btn) {
+        touchButton[id] = btn
+        performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+        if (engine.inMenu) {
+            when (btn) {
+                Controls.Btn.LEFT -> engine.menuAdjust(-1)
+                Controls.Btn.RIGHT -> engine.menuAdjust(1)
+                Controls.Btn.JUMP -> engine.menuSelect()
+                Controls.Btn.PAUSE -> if (engine.state == Engine.State.PAUSED) engine.togglePause() else engine.back()
+            }
+        } else {
+            when (btn) {
+                Controls.Btn.JUMP -> engine.pressJump()
+                Controls.Btn.PAUSE -> engine.togglePause()
+                else -> {}   // held directions are read every frame
+            }
+        }
+    }
+
     private fun clearPointer(id: Int) {
-        touchZone.remove(id); touchStart.remove(id); touchSwiped.remove(id)
+        touchZone.remove(id); touchStart.remove(id); touchSwiped.remove(id); touchButton.remove(id)
     }
 
     private fun releaseAllInput() {
-        touchZone.clear(); touchStart.clear(); touchSwiped.clear()
+        touchZone.clear(); touchStart.clear(); touchSwiped.clear(); touchButton.clear()
         keyLeft = false; keyRight = false; axisLeft = false; axisRight = false
     }
 

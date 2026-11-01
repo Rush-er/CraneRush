@@ -148,4 +148,67 @@ class EngineTest {
         e.update(1f / 60f)
         assertEquals(Engine.State.DYING, e.state)
     }
+
+    @Test fun jumpPushesCrateStackedOnAnother() {
+        val e = Engine(Random(9))
+        e.newGame(); e.testSkipBanner()
+        val p = e.testPlayerCol()
+        e.testPlace(p + 1, Engine.WOOD); e.testPlace(p + 1, Engine.WOOD)
+        e.pressJump(); e.pressStep(1)                     // tap jump, then right while rising
+        repeat(30) { e.update(1f / 60f) }
+        assertEquals(1, e.testHeight(p + 1))              // top crate pushed off the stack...
+        assertEquals(1, e.testHeight(p + 2))              // ...and landed in the next column
+        assertEquals(p + 1, e.testPlayerCol())
+    }
+
+    @Test fun holdingDirectionAndJumpingPushesStackedCrate() {
+        val e = Engine(Random(10))
+        e.newGame(); e.testSkipBanner()
+        val p = e.testPlayerCol()
+        e.testPlace(p + 1, Engine.WOOD); e.testPlace(p + 1, Engine.WOOD)
+        e.rightHeld = true; e.pressJump()
+        repeat(30) { e.update(1f / 60f) }
+        assertEquals(1, e.testHeight(p + 1))
+    }
+
+    @Test fun steelOnStackIsNotPushedFromJump() {
+        val e = Engine(Random(11))
+        e.newGame(); e.testSkipBanner()
+        val p = e.testPlayerCol()
+        e.testPlace(p + 1, Engine.WOOD); e.testPlace(p + 1, Engine.STEEL)
+        e.pressJump(); e.pressStep(1)
+        repeat(30) { e.update(1f / 60f) }
+        assertEquals(2, e.testHeight(p + 1))
+        assertEquals(p, e.testPlayerCol())
+    }
+
+    @Test fun jumpingIntoFallingCrateSmashesIt() {
+        val e = Engine(Random(12))
+        e.newGame(); e.testSkipBanner()
+        val p = e.testPlayerCol()
+        e.testDrop(p, 4f)
+        e.pressJump()
+        repeat(40) { e.update(1f / 60f) }
+        assertEquals(Engine.State.PLAYING, e.state)
+        assertEquals(0, e.testHeight(p))
+        assertEquals(0, e.testLooseCount)
+        assertTrue(e.score >= 5)
+    }
+
+    @Test fun fallingCrateStillKillsStandingPlayer() {
+        val e = Engine(Random(13))
+        e.newGame(); e.testSkipBanner()
+        e.testDrop(e.testPlayerCol(), 4f)
+        repeat(40) { e.update(1f / 60f) }
+        assertEquals(Engine.State.DYING, e.state)
+    }
+
+    @Test fun steelCrateKillsJumpingPlayer() {
+        val e = Engine(Random(14))
+        e.newGame(); e.testSkipBanner()
+        e.testDrop(e.testPlayerCol(), 4f, Engine.STEEL)
+        e.pressJump()
+        repeat(40) { e.update(1f / 60f) }
+        assertEquals(Engine.State.DYING, e.state)
+    }
 }
